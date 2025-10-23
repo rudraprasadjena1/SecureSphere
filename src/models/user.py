@@ -1,11 +1,12 @@
-# src/models/user.py
+# src/models/user.py (FIXED)
 import json
 import os
 from datetime import datetime
 from hashlib import sha256
-from typing import Optional, List # Import required types
+from typing import Optional, List
+from src.models.schemas import User
 from src.crypto.key_protection import KeyProtection
-from ..models.schemas import User # Your Pydantic User model
+
 
 class UserManager:
     def __init__(self, users_file="data/users.json"):
@@ -50,23 +51,21 @@ class UserManager:
         """Hash password (use bcrypt in production)"""
         return sha256(password.encode()).hexdigest()
 
-    # --- MODIFIED: create_user ---
-    # Now returns a Pydantic User model
     def create_user(self, username: str, email: str, password: str, kem_public_key: str,
-                sig_public_key: str, kem_private_key: bytes,
-                sig_private_key: bytes) -> Optional[User]:
+                    sig_public_key: str, kem_private_key: bytes,
+                    sig_private_key: bytes) -> Optional[User]:
         """Create user and return a Pydantic User model."""
         if username in self.users:
             print(f"User {username} already exists.")
             return None
 
-        encrypted_kem_private = KeyProtection.encrypt_private_key(kem_private_key, password)
-        encrypted_sig_private = KeyProtection.encrypt_private_key(sig_private_key, password)
+        encrypted_kem_private = KeyProtection.encrypt_private_key(
+            kem_private_key, password)
+        encrypted_sig_private = KeyProtection.encrypt_private_key(
+            sig_private_key, password)
 
-        # The dictionary we store on disk includes sensitive data
-        # and aligns with our storage format.
         user_data_to_store = {
-            "id": username,  # Use username as the user ID
+            "id": username,
             "username": username,
             "email": email,
             "password_hash": self.hash_password(password),
@@ -79,24 +78,23 @@ class UserManager:
             "last_seen": None,
             "contacts": []
         }
-        
+
         self.users[username] = user_data_to_store
         self.save_users()
-        
-        # Return a clean, validated Pydantic model.
-        # Pydantic will automatically ignore extra fields like 'password_hash'.
+
         return User.parse_obj(user_data_to_store)
 
-    # --- MODIFIED: get_user ---
-    # Now returns an Optional[User] Pydantic model
     def get_user(self, username: str) -> Optional[User]:
         """Get user by username and return a Pydantic model."""
         user_data = self.users.get(username)
         if user_data:
-            # Convert the stored dictionary into a Pydantic User object.
-            # This ensures the data is in the expected format and validated.
             return User.parse_obj(user_data)
         return None
+
+    def get_user_dict(self, username: str) -> Optional[dict]:
+        """Get user as dictionary (for internal use where dict access is needed)."""
+        # This should return the raw dictionary from self.users, not a Pydantic model
+        return self.users.get(username)
 
     def get_user_internal(self, username: str) -> Optional[dict]:
         """Get the full user dictionary, including private data."""
@@ -104,50 +102,71 @@ class UserManager:
 
     def verify_password(self, username: str, password: str) -> bool:
         """Verify user password"""
-        user = self.get_user_internal(username) # Use internal method
+        user = self.get_user_internal(username)
         if not user:
             return False
         return user["password_hash"] == self.hash_password(password)
 
-    # --- MODIFIED: get_all_users ---
-    # Now returns a List[User] of Pydantic models
     def get_all_users(self) -> List[User]:
         """Get all users as a list of Pydantic User models."""
         users_list = []
         for user_data in self.users.values():
-            # Parse each user dictionary into a User model. This strips out
-            # sensitive data and ensures consistent structure.
             users_list.append(User.parse_obj(user_data))
         return users_list
 
-    # --- Other methods remain largely the same, but should use get_user_internal ---
-    # --- for operations that modify the stored dictionary ---
+    def add_contact(self, from_user: str, to_user: str) -> bool:
+        """
+        Adds a contact to a user's contact list.
+        Returns True on success, False on failure.
+        """
+        # We operate directly on the self.users dictionary
+        from_user_data = self.get_user_internal(from_user)
+        to_user_data = self.get_user_internal(to_user)
+
+        if not from_user_data or not to_user_data:
+            print(f"Error: Cannot add contact. One or both users do not exist.")
+            return False
+
+        # Add 'to_user' to 'from_user's contact list
+        if 'contacts' not in from_user_data:
+            from_user_data['contacts'] = []  # Initialize if not present
+
+        if to_user not in from_user_data['contacts']:
+            from_user_data['contacts'].append(to_user)
+            print(f"Added {to_user} to {from_user}'s contact list.")
+
+        # For a reciprocal relationship, also add 'from_user' to 'to_user's list
+        if 'contacts' not in to_user_data:
+            to_user_data['contacts'] = []
+
+        if from_user not in to_user_data['contacts']:
+            to_user_data['contacts'].append(from_user)
+            print(f"Added {from_user} to {to_user}'s contact list.")
+
+        self.save_users()
+        return True
 
     def update_login_status(self, username: str, is_online: bool):
         """Update user online status"""
-        user = self.get_user_internal(username) # Use internal method
+        user = self.get_user_internal(username)
         if user:
             user["is_online"] = is_online
-            if is_online:
-                user["last_seen"] = datetime.now().isoformat()
-            else:
-                user["last_seen"] = datetime.now().isoformat() # Also update on logout
+            user["last_seen"] = datetime.now().isoformat()
             self.save_users()
-            
+
     def get_private_key(self, username: str, password: str, key_type: str):
         """Retrieve and decrypt private key"""
-        user = self.get_user_internal(username) # Use internal method
+        user = self.get_user_internal(username)
         if not user or not self.verify_password(username, password):
             return None
 
         encrypted_key_field = f"encrypted_{key_type}_private"
         if encrypted_key_field not in user:
             return None
-        
+
         encrypted_key_data = user[encrypted_key_field]
-        
+
         try:
-            # ... (rest of the decryption logic remains the same) ...
             return KeyProtection.decrypt_private_key(encrypted_key_data, password)
         except Exception as e:
             print(f"Failed to decrypt private key for {username}: {e}")

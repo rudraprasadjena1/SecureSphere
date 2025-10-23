@@ -2,6 +2,7 @@
 import os
 
 class Config:
+    MESSAGES_FILE = 'data/messages.json'
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'quantum-safe-secret-key'
     DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
     USERS_FILE = os.environ.get('USERS_FILE') or 'data/users.json'
