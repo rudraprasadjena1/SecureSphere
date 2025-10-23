@@ -1,4 +1,4 @@
-# src/routes/message.py
+# src/routes/message.py (COMPLETE WITH JWT)
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
 from src.crypto.kyber import KyberManager
@@ -7,67 +7,71 @@ from src.crypto.symmetric import SymmetricManager
 from src.models.user import UserManager
 from src.models.message import MessageManager
 from src.utils.helpers import b64encode, b64decode
+from src.middleware.auth import token_required
+from src.utils.jwt_utils import JWTManager # Import JWTManager
 
 message_bp = Blueprint('message', __name__)
-
 
 def get_user_manager():
     """Get UserManager instance using current app config"""
     users_file = current_app.config.get('USERS_FILE', 'data/users.json')
     return UserManager(users_file)
 
-
 def get_message_manager():
     """Get MessageManager instance using current app config"""
-    messages_file = current_app.config.get(
-        'MESSAGES_FILE', 'data/messages.json')
+    messages_file = current_app.config.get('MESSAGES_FILE', 'data/messages.json')
     return MessageManager(messages_file)
 
-# src/routes/message.py (with comprehensive debugging)
+def get_token_from_header():
+    """Helper to extract the token from the Authorization header."""
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Bearer '):
+        return auth_header.split(' ')[1]
+    return None
 
-
-# src/routes/message.py (COMPREHENSIVE FIX)
 @message_bp.route("/send", methods=["POST"])
+@token_required
 def send_message():
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    sender = data.get("sender")
-    password = data.get("password")
+    sender = request.username  # Get from JWT token
     recipient = data.get("recipient")
     message = data.get("message", "")
 
-    print(
-        f"DEBUG: Send message request - sender: {sender}, recipient: {recipient}")
+    print(f"DEBUG: Send message request - sender: {sender}, recipient: {recipient}")
 
-    if not sender or not password or not recipient:
-        return jsonify({"error": "Sender, password, and recipient required"}), 400
+    if not recipient:
+        return jsonify({"error": "Recipient required"}), 400
 
     user_manager = get_user_manager()
     message_manager = get_message_manager()
 
-    # Verify sender credentials and get private key
-    if not user_manager.verify_password(sender, password):
-        return jsonify({"error": "Invalid credentials"}), 401
+    # --- FIX START ---
+    # Retrieve private keys from the JWT token instead of decrypting from storage
+    token = get_token_from_header()
+    if not token:
+        return jsonify({"error": "Authorization token not found"}), 401
 
-    sender_sig_sk = user_manager.get_private_key(sender, password, "sig")
-    if not sender_sig_sk:
-        return jsonify({"error": "Failed to retrieve signing key"}), 500
+    private_keys = JWTManager.extract_private_keys(token)
+    if not private_keys or 'sig_private' not in private_keys:
+        return jsonify({"error": "Failed to retrieve signing key from token"}), 500
+    
+    sender_sig_sk = b64decode(private_keys['sig_private'])
+    # --- FIX END ---
 
-    # Get recipient's public key - ROBUST FIX
+    # Get recipient's public key
     recipient_user = user_manager.get_user_dict(recipient)
     if not recipient_user:
         return jsonify({"error": "Recipient not found"}), 404
 
     # Ensure we have a dictionary, not a Pydantic model
     if hasattr(recipient_user, 'dict'):
-        # It's a Pydantic model, convert to dict
         recipient_user = recipient_user.dict()
 
     print(f"DEBUG: Recipient data type: {type(recipient_user)}")
-    print(
-        f"DEBUG: Available keys: {list(recipient_user.keys()) if isinstance(recipient_user, dict) else 'N/A'}")
+    print(f"DEBUG: Available keys: {list(recipient_user.keys()) if isinstance(recipient_user, dict) else 'N/A'}")
 
     try:
         # Safe key access - handle both dict and object access
@@ -84,10 +88,8 @@ def send_message():
         message_bytes = message.encode()
 
         # Encrypt and sign message
-        shared_key, ciphertext_kem = KyberManager.encrypt(
-            message_bytes, recipient_kem_pk)
-        nonce, ciphertext, tag = SymmetricManager.encrypt(
-            message_bytes, shared_key)
+        shared_key, ciphertext_kem = KyberManager.encrypt(message_bytes, recipient_kem_pk)
+        nonce, ciphertext, tag = SymmetricManager.encrypt(message_bytes, shared_key)
         signature = DilithiumManager.sign(ciphertext, sender_sig_sk)
 
         # Prepare message data for storage
@@ -103,12 +105,13 @@ def send_message():
         }
 
         # Store the encrypted message
-        message_manager.store_message(sender, recipient, message_data)
+        conversation_id = message_manager.store_message(sender, recipient, message_data)
 
         return jsonify({
             "success": True,
             "message": "Message sent successfully",
-            "data": message_data
+            "data": message_data,
+            "conversation_id": conversation_id
         })
     except Exception as e:
         import traceback
@@ -116,45 +119,50 @@ def send_message():
         print(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": f"Message sending failed: {str(e)}"}), 500
 
-
 @message_bp.route("/receive", methods=["POST"])
+@token_required
 def receive_message():
+    """Receive and decrypt a specific message"""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    recipient = data.get("recipient")
-    password = data.get("password")
+    recipient = request.username  # Get from JWT token
     sender = data.get("sender")
+    message_data = data.get("message_data")
 
-    if not recipient or not password or not sender:
-        return jsonify({"error": "Recipient, password, and sender required"}), 400
+    if not sender or not message_data:
+        return jsonify({"error": "Sender and message data required"}), 400
 
     user_manager = get_user_manager()
 
-    # Verify recipient credentials and get private key
-    if not user_manager.verify_password(recipient, password):
-        return jsonify({"error": "Invalid credentials"}), 401
+    # --- FIX START ---
+    # Get recipient's private key for decryption from the JWT token
+    token = get_token_from_header()
+    if not token:
+        return jsonify({"error": "Authorization token not found"}), 401
 
-    recipient_kem_sk = user_manager.get_private_key(recipient, password, "kem")
-    if not recipient_kem_sk:
-        return jsonify({"error": "Failed to retrieve decryption key"}), 500
+    private_keys = JWTManager.extract_private_keys(token)
+    if not private_keys or 'kem_private' not in private_keys:
+        return jsonify({"error": "Failed to retrieve decryption key from token"}), 500
 
-    # Get sender's public keys for verification - FIXED: Use get_user_dict()
-    sender_user = user_manager.get_user_dict(sender)  # CHANGED HERE
+    recipient_kem_sk = b64decode(private_keys['kem_private'])
+    # --- FIX END ---
+
+    # Get sender's public keys for verification
+    sender_user = user_manager.get_user_dict(sender)
     if not sender_user:
         return jsonify({"error": "Sender not found"}), 404
 
     try:
         # Convert message data from base64
-        ciphertext_kem = b64decode(data["ciphertext_kem"])
-        ciphertext = b64decode(data["ciphertext"])
-        nonce = b64decode(data["nonce"])
-        tag = b64decode(data["tag"])
-        signature = b64decode(data["signature"])
+        ciphertext_kem = b64decode(message_data["ciphertext_kem"])
+        ciphertext = b64decode(message_data["ciphertext"])
+        nonce = b64decode(message_data["nonce"])
+        tag = b64decode(message_data["tag"])
+        signature = b64decode(message_data["signature"])
 
-        sender_sig_pk = b64decode(
-            sender_user["sig_public_key"])  # Now this works
+        sender_sig_pk = b64decode(sender_user["sig_public_key"])
 
         # Verify signature first
         if not DilithiumManager.verify(ciphertext, signature, sender_sig_pk):
@@ -164,15 +172,14 @@ def receive_message():
         shared_key = KyberManager.decrypt(ciphertext_kem, recipient_kem_sk)
 
         # Decrypt the symmetric ciphertext
-        plaintext = SymmetricManager.decrypt(
-            ciphertext, shared_key, nonce, tag)
+        plaintext = SymmetricManager.decrypt(ciphertext, shared_key, nonce, tag)
 
         return jsonify({
             "success": True,
             "message": plaintext.decode(),
             "sender": sender,
             "recipient": recipient,
-            "timestamp": data.get("timestamp")
+            "timestamp": message_data.get("timestamp")
         })
 
     except ValueError as e:
@@ -186,32 +193,43 @@ def receive_message():
         print(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": f"Message receiving failed: {str(e)}"}), 500
 
-
 @message_bp.route("/history", methods=["POST"])
+@token_required
 def get_message_history():
     """Get message history between two users"""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    user1 = data.get("user1")
+    user1 = request.username  # Get from JWT token
     user2 = data.get("user2")
-    password = data.get("password")  # Require password for authentication
 
-    if not user1 or not user2 or not password:
-        return jsonify({"error": "Both users and password required"}), 400
+    if not user2:
+        return jsonify({"error": "Other user required"}), 400
 
     user_manager = get_user_manager()
     message_manager = get_message_manager()
-
-    # Verify user credentials
-    if not user_manager.verify_password(user1, password):
-        return jsonify({"error": "Invalid credentials"}), 401
-
+    
+    # --- FIX START ---
+    # Get private key for decryption from the JWT token
+    token = get_token_from_header()
+    if not token:
+        return jsonify({"error": "Authorization token not found"}), 401
+        
+    private_keys = JWTManager.extract_private_keys(token)
+    user_kem_sk = None
+    if private_keys and 'kem_private' in private_keys:
+        user_kem_sk = b64decode(private_keys['kem_private'])
+    
+    if not user_kem_sk:
+        # Return an error or handle gracefully if key is missing
+        # For history, we can proceed but won't be able to decrypt received messages
+        print("WARN: KEM private key not in token. Will not be able to decrypt received messages in history.")
+    # --- FIX END ---
+    
     try:
         # Get encrypted message history
-        encrypted_history = message_manager.get_conversation_history(
-            user1, user2)
+        encrypted_history = message_manager.get_conversation_history(user1, user2)
 
         decrypted_history = []
 
@@ -221,17 +239,10 @@ def get_message_history():
                 continue
 
             try:
-                # Decrypt message if the current user is the recipient
-                if msg_data["recipient"] == user1:
-                    # Get private key for decryption
-                    user_kem_sk = user_manager.get_private_key(
-                        user1, password, "kem")
-                    if not user_kem_sk:
-                        continue
-
-                    # Get sender's public key for verification - FIXED: Use get_user_dict()
-                    sender_user = user_manager.get_user_dict(
-                        msg_data["sender"])  # CHANGED HERE
+                # Decrypt message if the current user is the recipient and we have the key
+                if msg_data["recipient"] == user1 and user_kem_sk:
+                    # Get sender's public key for verification
+                    sender_user = user_manager.get_user_dict(msg_data["sender"])
                     if not sender_user:
                         continue
 
@@ -242,20 +253,18 @@ def get_message_history():
                     tag = b64decode(msg_data["tag"])
                     signature = b64decode(msg_data["signature"])
 
-                    sender_sig_pk = b64decode(
-                        sender_user["sig_public_key"])  # Now this works
+                    sender_sig_pk = b64decode(sender_user["sig_public_key"])
 
                     # Verify signature
                     if not DilithiumManager.verify(ciphertext, signature, sender_sig_pk):
                         continue
 
                     # Decrypt the message
-                    shared_key = KyberManager.decrypt(
-                        ciphertext_kem, user_kem_sk)
-                    plaintext = SymmetricManager.decrypt(
-                        ciphertext, shared_key, nonce, tag)
+                    shared_key = KyberManager.decrypt(ciphertext_kem, user_kem_sk)
+                    plaintext = SymmetricManager.decrypt(ciphertext, shared_key, nonce, tag)
 
                     decrypted_history.append({
+                        "id": f"msg_{len(decrypted_history)}",
                         "sender": msg_data["sender"],
                         "recipient": msg_data["recipient"],
                         "message": plaintext.decode(),
@@ -263,18 +272,34 @@ def get_message_history():
                         "isSender": msg_data["sender"] == user1
                     })
                 else:
-                    # Message was sent by the current user
+                    # Message was sent by the current user OR we can't decrypt
+                    is_sender = msg_data["sender"] == user1
+                    message_text = "[Your sent message]" if is_sender else "[Encrypted message]"
+                    error_code = None if is_sender else "decryption_key_unavailable"
+
                     decrypted_history.append({
+                        "id": f"msg_{len(decrypted_history)}",
                         "sender": msg_data["sender"],
                         "recipient": msg_data["recipient"],
-                        "message": "[Encrypted message you sent]",
+                        "message": message_text,
                         "timestamp": msg_data["timestamp"],
-                        "isSender": True
+                        "isSender": is_sender,
+                        "error": error_code
                     })
 
             except Exception as e:
                 # Skip messages that can't be decrypted
                 print(f"Failed to decrypt message from history: {str(e)}")
+                # Add encrypted message as placeholder
+                decrypted_history.append({
+                    "id": f"msg_{len(decrypted_history)}",
+                    "sender": msg_data["sender"],
+                    "recipient": msg_data["recipient"],
+                    "message": "[Encrypted message]",
+                    "timestamp": msg_data["timestamp"],
+                    "isSender": msg_data["sender"] == user1,
+                    "error": "decryption_failed"
+                })
                 continue
 
         # Sort by timestamp
@@ -284,45 +309,161 @@ def get_message_history():
             "success": True,
             "history": decrypted_history,
             "user1": user1,
-            "user2": user2
+            "user2": user2,
+            "count": len(decrypted_history)
         })
 
     except Exception as e:
+        import traceback
+        print(f"Error in get_message_history: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": f"Failed to retrieve message history: {str(e)}"}), 500
 
+# (The rest of the file remains the same)
 
-@message_bp.route("/conversations", methods=["POST"])
+@message_bp.route("/conversations", methods=["GET"])
+@token_required
 def get_user_conversations():
     """Get all conversations for a user"""
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No JSON data provided"}), 400
-
-    username = data.get("username")
-    password = data.get("password")
-
-    if not username or not password:
-        return jsonify({"error": "Username and password required"}), 400
+    username = request.username  # Get from JWT token
 
     user_manager = get_user_manager()
     message_manager = get_message_manager()
 
-    # Verify user credentials
-    if not user_manager.verify_password(username, password):
-        return jsonify({"error": "Invalid credentials"}), 401
-
     try:
         conversations = message_manager.get_user_conversations(username)
+        
+        # Enhance conversations with user details
+        enhanced_conversations = []
+        for conv in conversations:
+            other_user = user_manager.get_user_dict(conv['other_user'])
+            if other_user:
+                # Convert to dict if it's a Pydantic model
+                if hasattr(other_user, 'dict'):
+                    other_user = other_user.dict()
+                
+                enhanced_conv = {
+                    'other_user': conv['other_user'],
+                    'conversation_id': conv['conversation_id'],
+                    'last_message': conv['last_message'],
+                    'message_count': conv['message_count'],
+                    'last_updated': conv['last_updated'],
+                    'user_details': {
+                        'username': other_user.get('username'),
+                        'email': other_user.get('email'),
+                        'is_online': other_user.get('is_online', False),
+                        'last_seen': other_user.get('last_seen')
+                    }
+                }
+                enhanced_conversations.append(enhanced_conv)
+
         return jsonify({
             "success": True,
-            "conversations": conversations,
+            "conversations": enhanced_conversations,
             "username": username
         })
     except Exception as e:
+        import traceback
+        print(f"Error in get_user_conversations: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": f"Failed to retrieve conversations: {str(e)}"}), 500
 
-# Add this test endpoint to message.py to verify user data types
+@message_bp.route("/conversations", methods=["POST"])
+@token_required
+def get_user_conversations_post():
+    """Get all conversations for a user (POST method for consistency)"""
+    return get_user_conversations()
 
+@message_bp.route("/delete", methods=["POST"])
+@token_required
+def delete_message():
+    """Delete a specific message (placeholder implementation)"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+
+    message_id = data.get("message_id")
+    # Implementation would depend on your message storage structure
+    
+    return jsonify({
+        "success": True,
+        "message": "Message deletion endpoint - implement based on storage needs"
+    })
+
+@message_bp.route("/clear-conversation", methods=["POST"])
+@token_required
+def clear_conversation():
+    """Clear all messages in a conversation"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+
+    user1 = request.username
+    user2 = data.get("user2")
+
+    if not user2:
+        return jsonify({"error": "Other user required"}), 400
+
+    # This would require modifying the MessageManager to support deletion
+    # For now, return a placeholder response
+    
+    return jsonify({
+        "success": True,
+        "message": f"Conversation between {user1} and {user2} would be cleared",
+        "note": "Implementation needed in MessageManager"
+    })
+
+@message_bp.route("/search", methods=["POST"])
+@token_required
+def search_messages():
+    """Search messages in conversations"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+
+    query = data.get("query", "").lower()
+    username = request.username
+
+    if not query:
+        return jsonify({"error": "Search query required"}), 400
+
+    user_manager = get_user_manager()
+    message_manager = get_message_manager()
+
+    try:
+        # Get all conversations for the user
+        conversations = message_manager.get_user_conversations(username)
+        search_results = []
+
+        for conv in conversations:
+            # Get message history for this conversation
+            history = message_manager.get_conversation_history(username, conv['other_user'])
+            
+            for msg_data in history:
+                # For now, we can only search in messages we sent
+                # To search in received messages, we'd need to decrypt them all
+                if msg_data["sender"] == username:
+                    # This is where we'd decrypt and search if we stored plaintext
+                    # For now, return basic message info
+                    search_results.append({
+                        "conversation_with": conv['other_user'],
+                        "timestamp": msg_data["timestamp"],
+                        "preview": "[Encrypted message content]",
+                        "is_sent": True
+                    })
+
+        return jsonify({
+            "success": True,
+            "results": search_results,
+            "query": query,
+            "count": len(search_results)
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"Error in search_messages: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Search failed: {str(e)}"}), 500
 
 @message_bp.route("/simple-test", methods=["GET"])
 def simple_test():
@@ -422,3 +563,64 @@ def simple_test():
         
         print("--- DEBUG: /simple-test endpoint failed with an exception ---")
         return jsonify(response_data), 500
+
+@message_bp.route("/status", methods=["GET"])
+@token_required
+def message_status():
+    """Get message service status"""
+    username = request.username
+    
+    user_manager = get_user_manager()
+    message_manager = get_message_manager()
+    
+    try:
+        # Get basic stats
+        conversations = message_manager.get_user_conversations(username)
+        total_messages = sum(conv['message_count'] for conv in conversations)
+        
+        return jsonify({
+            "success": True,
+            "status": "operational",
+            "user": username,
+            "stats": {
+                "total_conversations": len(conversations),
+                "total_messages": total_messages,
+                "last_active": datetime.now().isoformat()
+            },
+            "crypto": {
+                "kem_algorithm": current_app.config.get('KEM_ALGORITHM', 'Kyber512'),
+                "sig_algorithm": current_app.config.get('SIG_ALGORITHM', 'Dilithium2'),
+                "symmetric_algorithm": current_app.config.get('SYMMETRIC_ALGORITHM', 'AES-GCM')
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Status check failed: {str(e)}"
+        }), 500
+
+# Health check endpoint
+@message_bp.route("/health", methods=["GET"])
+def health_check():
+    """Message service health check"""
+    try:
+        user_manager = get_user_manager()
+        message_manager = get_message_manager()
+        
+        # Basic functionality test
+        test_user = list(user_manager.users.keys())[0] if user_manager.users else "test"
+        conversations = message_manager.get_user_conversations(test_user)
+        
+        return jsonify({
+            "status": "healthy",
+            "service": "message",
+            "users_count": len(user_manager.users),
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "service": "message",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500

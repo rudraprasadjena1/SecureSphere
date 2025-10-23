@@ -6,6 +6,7 @@ from hashlib import sha256
 from typing import Optional, List
 from src.models.schemas import User
 from src.crypto.key_protection import KeyProtection
+import bcrypt
 
 
 class UserManager:
@@ -48,8 +49,16 @@ class UserManager:
                 raise
 
     def hash_password(self, password: str) -> str:
-        """Hash password (use bcrypt in production)"""
-        return sha256(password.encode()).hexdigest()
+        """
+        Hash a password using bcrypt. The salt is automatically generated
+        and stored as part of the hash.
+        """
+        # bcrypt requires bytes, so we encode the password
+        password_bytes = password.encode('utf-8')
+        # Generate a salt and hash the password
+        hashed_bytes = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
+        # Decode back to a string for JSON storage
+        return hashed_bytes.decode('utf-8')
 
     def create_user(self, username: str, email: str, password: str, kem_public_key: str,
                     sig_public_key: str, kem_private_key: bytes,
@@ -101,11 +110,17 @@ class UserManager:
         return self.users.get(username)
 
     def verify_password(self, username: str, password: str) -> bool:
-        """Verify user password"""
+        """Verify a user's password against the stored bcrypt hash."""
         user = self.get_user_internal(username)
         if not user:
             return False
-        return user["password_hash"] == self.hash_password(password)
+        
+        password_bytes = password.encode('utf-8')
+        hashed_password_bytes = user["password_hash"].encode('utf-8')
+        
+        # bcrypt's checkpw function securely compares the plain-text password
+        # with the hash, handling the salt automatically.
+        return bcrypt.checkpw(password_bytes, hashed_password_bytes)
 
     def get_all_users(self) -> List[User]:
         """Get all users as a list of Pydantic User models."""

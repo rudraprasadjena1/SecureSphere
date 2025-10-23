@@ -5,3 +5,4 @@ kyber-py
 dilithium-py
 pytest
 requests
+pyjwt

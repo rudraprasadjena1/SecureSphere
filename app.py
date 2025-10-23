@@ -4,6 +4,7 @@ from flask_cors import CORS
 from flask import Flask, jsonify, g
 import os
 import sys
+from src.middleware.auth import get_current_user
 
 # Add the src directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -17,7 +18,7 @@ def create_app():
     CORS(app, resources={
         r"/api/*": {
             "origins": ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5000"],
-            "methods": ["GET", "POST", "PUT", "DELETE"],
+            "methods": ["GET", "POST", "PUT", "DELETE","OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization"],
             "supports_credentials": True  # turn off if you using JWT tokens in Authorization headers (without cookies)
         }
@@ -39,6 +40,10 @@ def create_app():
     except ImportError as e:
         print(f"Warning: Could not import blueprints: {e}")
 
+    
+    @app.before_request
+    def load_user():
+        g.user = get_current_user()
     # Root endpoint
     @app.route("/")
     def index():

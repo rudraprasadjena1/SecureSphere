@@ -5,8 +5,26 @@ import random
 import requests
 import time
 
+DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
 # --- API Configuration ---
 API_BASE_URL = "http://127.0.0.1:5000/api"
+
+def clear_existing_data():
+    """Deletes existing user and message data for a clean seed."""
+    print("--- Clearing existing data ---")
+    users_file = os.path.join(DATA_DIR, 'users.json')
+    messages_file = os.path.join(DATA_DIR, 'messages.json')
+    blacklist_file = os.path.join(DATA_DIR, 'token_blacklist.json')
+    
+    for f in [users_file, messages_file, blacklist_file]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+                print(f"Removed {f}")
+            except OSError as e:
+                print(f"Error removing file {f}: {e}")
+        else:
+            print(f"File not found, skipping: {f}")
 
 def generate_users_via_api(num_users=30):
     """
@@ -99,4 +117,5 @@ def generate_users_via_api(num_users=30):
     print("All users share the same password: 'password123'")
 
 if __name__ == "__main__":
+    clear_existing_data()
     generate_users_via_api(30)
