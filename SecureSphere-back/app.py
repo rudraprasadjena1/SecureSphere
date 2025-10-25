@@ -29,11 +29,13 @@ def create_app():
         from src.routes.auth import auth_bp
         from src.routes.message import message_bp
         from src.routes.contacts import contacts_bp
+        from src.routes.matrix_simple import matrix_bp
 
         # Register blueprints
         app.register_blueprint(auth_bp, url_prefix='/api/auth')
         app.register_blueprint(message_bp, url_prefix='/api/message')
         app.register_blueprint(contacts_bp, url_prefix='/api/contacts')
+        app.register_blueprint(matrix_bp, url_prefix='/api')
 
         print("Successfully registered auth, message, and contacts blueprints")
 

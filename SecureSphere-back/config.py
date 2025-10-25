@@ -24,3 +24,6 @@ class Config:
     KEM_ALGORITHM = 'Kyber512'
     SIG_ALGORITHM = 'Dilithium2'
     SYMMETRIC_ALGORITHM = 'AES-GCM'
+    
+    MATRIX_HOMESERVER_URL = os.environ.get('MATRIX_HOMESERVER_URL', 'https://matrix.org')
+    MATRIX_INTEGRATION_ENABLED = True
