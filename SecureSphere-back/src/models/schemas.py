@@ -37,3 +37,24 @@ class ContactResponse(BaseModel):
     is_online: bool
     last_seen: Optional[datetime]
     status: str
+
+
+class ForwardSecretMessage(BaseModel):
+    """Schema for per-message forward secret messages"""
+    message_id: str
+    sender: str
+    recipient: str
+    ciphertext_kem: str  # base64
+    ciphertext: str      # base64  
+    nonce: str          # base64
+    tag: str            # base64
+    signature: str      # base64
+    ephemeral_public_key: str  # base64 - FRESH for each message
+    timestamp: datetime
+    version: str = "2.0-per-message-fs"
+    algorithm: str = "Kyber512-X25519-Per-Message-FS"
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }

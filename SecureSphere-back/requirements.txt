@@ -10,3 +10,4 @@ matrix-client==0.4.0
 requests==2.31.0
 pydantic
 bcrypt
+cryptography
